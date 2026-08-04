@@ -3,9 +3,12 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>WUTWIZ - Admin LMS</title>
+    <title>WUTWIZ - Admin LMS (Firebase)</title>
     
     <script src="https://cdn.jsdelivr.net/npm/sweetalert2@11"></script> 
+    <!-- Firebase SDK Compat -->
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
     <link href="https://fonts.googleapis.com/css2?family=Prompt:wght@300;400;500;600;700&display=swap" rel="stylesheet">
     
     <style>
@@ -79,6 +82,11 @@
         input[type="checkbox"] { width: 18px; height: 18px; cursor: pointer; accent-color: var(--primary); }
 
         #ai-analysis-result { background: #eff6ff; border: 1px solid #bfdbfe; padding: 25px; border-radius: 16px; margin-top: 20px; display: none; line-height: 1.8; color: #1e3a8a; font-size: 15px; box-shadow: inset 0 2px 10px rgba(0,0,0,0.02); }
+        
+        /* สัญลักษณ์ Real-time */
+        .live-indicator { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: #059669; font-weight: 600; background: #dcfce7; padding: 4px 10px; border-radius: 15px; }
+        .dot { width: 8px; height: 8px; background: #10b981; border-radius: 50%; animation: pulse 1.5s infinite; }
+        @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(16,185,129,0.7); } 70% { box-shadow: 0 0 0 6px rgba(16,185,129,0); } 100% { box-shadow: 0 0 0 0 rgba(16,185,129,0); } }
     </style>
 </head>
 <body>
@@ -92,7 +100,7 @@
 
     <div class="header-title">
         <h1>AR By Cool WUTWIZ</h1>
-        <span class="badge">ระบบจัดการหลังบ้าน (LMS)</span>
+        <span class="badge">ระบบจัดการหลังบ้าน (Firebase LMS)</span>
     </div>
     
     <div class="tabs">
@@ -106,10 +114,11 @@
     <div id="tab-dashboard" class="tab-content active">
         <div class="card">
             <h2>
-                <span>สถิติผู้เรียนและคะแนน</span>
+                <div style="display: flex; align-items: center; gap: 10px;">
+                    สถิติผู้เรียนและคะแนน
+                    <div class="live-indicator"><div class="dot"></div> Real-time</div>
+                </div>
                 <div style="display: flex; gap: 10px; flex-wrap: wrap;">
-                    <button class="btn-secondary" onclick="loadDashboard()">อัปเดตข้อมูล</button>
-                    <!-- เพิ่มปุ่มดาวน์โหลด CSV -->
                     <button class="btn-export" onclick="exportToCSV()">ดาวน์โหลด CSV (Excel)</button>
                     <button class="btn-ai" onclick="analyzeDataWithAI()">AI วิเคราะห์สถิติ</button>
                 </div>
@@ -133,7 +142,6 @@
                         <option value="name">ตามชื่อนักเรียน (ก-ฮ)</option>
                     </select>
                 </div>
-                <!-- ปุ่มลบข้อมูลที่เลือก -->
                 <button class="btn-danger" style="margin-top: 22px; padding: 13px 20px;" onclick="deleteSelectedScores()">ลบข้อมูลที่เลือก</button>
             </div>
 
@@ -232,17 +240,28 @@
 </div>
 
 <script>
-    const API_URL = "https://script.google.com/macros/s/AKfycbwF9527Ppfs27WgKj6zffbrnYA4kGdWNkq3WGljegm9k1JCdrgzPxdX65NRs7ungLWIHA/exec"; 
+    // --- 1. ตั้งค่า Firebase ---
+    const firebaseConfig = {
+        apiKey: "AIzaSyCZxXSio6AidUz97hXe2_4lF-Gl5UGuSOk",
+        authDomain: "ar-computational-thinking.firebaseapp.com",
+        projectId: "ar-computational-thinking",
+        storageBucket: "ar-computational-thinking.firebasestorage.app",
+        messagingSenderId: "973409706947",
+        appId: "1:973409706947:web:c3d0178271d742b4451376"
+    };
+    firebase.initializeApp(firebaseConfig);
+    const db = firebase.firestore();
     
-    let editingRowIndex = null; 
+    let editingDocId = null; 
     let dashboardDataRaw = []; 
+    let unsubscribeDashboard = null; // สำหรับยกเลิก Real-time listener
 
     window.onload = function() {
         if(localStorage.getItem('gemini_key')) {
             document.getElementById('api-key').value = localStorage.getItem('gemini_key');
         }
         loadCategories();
-        loadDashboard();
+        startRealtimeDashboard();
     };
 
     function switchTab(tabId) {
@@ -260,11 +279,10 @@
         }
     }
 
+    // --- ระบบหมวดหมู่ (Categories) ---
     async function loadCategories() {
         try {
-            const res = await fetch(API_URL + "?action=getCategories", {redirect: "follow"});
-            const categories = await res.json();
-            
+            const snapshot = await db.collection('categories').get();
             let tbody = document.getElementById('cat-table-body');
             let qSelect = document.getElementById('q-category');
             let filterSelect = document.getElementById('filter-cat');
@@ -273,24 +291,26 @@
             qSelect.innerHTML = '<option value="" disabled selected>-- เลือกหมวดหมู่ --</option>';
             filterSelect.innerHTML = '<option value="all">ดูทุกหมวดหมู่</option>';
 
-            categories.forEach(c => {
-                tbody.innerHTML += `<tr><td style="font-weight: 500;">${c.name}</td><td style="text-align: center;"><button class="btn-danger" onclick="deleteCategory(${c.rowIndex})">ลบ</button></td></tr>`;
-                qSelect.innerHTML += `<option value="${c.name}">${c.name}</option>`;
-                filterSelect.innerHTML += `<option value="${c.name}">${c.name}</option>`;
+            snapshot.forEach(doc => {
+                let catName = doc.data().name;
+                tbody.innerHTML += `<tr><td style="font-weight: 500;">${catName}</td><td style="text-align: center;"><button class="btn-danger" onclick="deleteCategory('${doc.id}')">ลบ</button></td></tr>`;
+                qSelect.innerHTML += `<option value="${catName}">${catName}</option>`;
+                filterSelect.innerHTML += `<option value="${catName}">${catName}</option>`;
             });
-        } catch (error) { console.error(error); }
+        } catch (error) { console.error("Error loading categories:", error); }
     }
 
     async function addCategory() {
         let name = document.getElementById('new-category').value;
         if(!name) { Swal.fire({ icon: 'warning', title: 'แจ้งเตือน', text: 'กรุณาพิมพ์ชื่อหมวดหมู่ก่อนครับ', confirmButtonColor: '#3b82f6' }); return; }
-        await fetch(API_URL + `?action=addCategory&categoryName=${encodeURIComponent(name)}`, {redirect: "follow"});
+        
+        await db.collection('categories').add({ name: name });
         document.getElementById('new-category').value = '';
         Swal.fire({ icon: 'success', title: 'เพิ่มหมวดหมู่สำเร็จ', timer: 1500, showConfirmButton: false });
         loadCategories();
     }
     
-    function deleteCategory(rowIndex) {
+    function deleteCategory(docId) {
         Swal.fire({
             title: 'ยืนยันการลบ?',
             text: "หมวดหมู่นี้จะถูกลบออกจากระบบ (แต่ข้อสอบเดิมยังอยู่)",
@@ -298,43 +318,50 @@
             showCancelButton: true,
             confirmButtonColor: '#ef4444',
             cancelButtonColor: '#94a3b8',
-            confirmButtonText: 'ใช่, ลบเลย!',
-            cancelButtonText: 'ยกเลิก'
+            confirmButtonText: 'ใช่, ลบเลย!'
         }).then(async (result) => {
             if (result.isConfirmed) {
-                await fetch(API_URL + `?action=deleteCategory&rowIndex=${rowIndex}`, {redirect: "follow"});
+                await db.collection('categories').doc(docId).delete();
                 Swal.fire({ icon: 'success', title: 'ลบสำเร็จ', timer: 1500, showConfirmButton: false });
                 loadCategories();
             }
         });
     }
 
+    // --- ระบบข้อสอบ (Questions) ---
     async function loadQuestions() {
         let cat = document.getElementById('q-category').value;
         if(!cat) return;
         try {
-            const res = await fetch(API_URL + `?action=getQuestions&category=${encodeURIComponent(cat)}`, {redirect: "follow"});
-            const questions = await res.json();
+            const snapshot = await db.collection('questions').where('category', '==', cat).get();
             let tbody = document.querySelector('#q-table tbody');
             tbody.innerHTML = '';
             
-            document.getElementById('q-count').innerText = `${questions.length}/15 ข้อ`;
-            if(questions.length >= 15 && !editingRowIndex) {
+            let count = snapshot.size;
+            document.getElementById('q-count').innerText = `${count}/15 ข้อ`;
+            
+            if(count >= 15 && !editingDocId) {
                 document.getElementById('q-count').style.color = "#dc2626";
                 document.getElementById('q-count').style.background = "#fee2e2";
                 document.getElementById('save-btn').disabled = true; document.getElementById('save-btn').innerHTML = "ข้อสอบเต็ม 15 ข้อแล้ว";
             } else {
                 document.getElementById('q-count').style.color = "#2563eb";
                 document.getElementById('q-count').style.background = "#e0f2fe";
-                document.getElementById('save-btn').disabled = false; document.getElementById('save-btn').innerHTML = editingRowIndex ? "บันทึกการแก้ไข" : "บันทึกข้อสอบ";
+                document.getElementById('save-btn').disabled = false; document.getElementById('save-btn').innerHTML = editingDocId ? "บันทึกการแก้ไข" : "บันทึกข้อสอบ";
             }
 
-            questions.forEach(q => {
-                let qDataStr = encodeURIComponent(JSON.stringify(q));
+            snapshot.forEach(doc => {
+                let d = doc.data();
+                let ansText = d['c'+d.ans]; // ดึงข้อความของตัวเลือกที่ถูก
+                
+                // แนบ ID ไปกับ Data เพื่อเวลา Edit จะได้อ้างอิงถูก
+                let qData = { id: doc.id, ...d };
+                let qDataStr = encodeURIComponent(JSON.stringify(qData));
+                
                 tbody.innerHTML += `<tr>
-                    <td>${q.q}</td>
-                    <td style="color: #059669; font-weight: 600;">${q.choices[q.ansIndex - 1].text}</td>
-                    <td style="text-align: center;"><button class="btn-warning" onclick="editQuestion('${qDataStr}')">แก้</button> &nbsp; <button class="btn-danger" onclick="deleteQuestion(${q.rowIndex})">ลบ</button></td>
+                    <td>${d.q}</td>
+                    <td style="color: #059669; font-weight: 600;">${ansText}</td>
+                    <td style="text-align: center;"><button class="btn-warning" onclick="editQuestion('${qDataStr}')">แก้</button> &nbsp; <button class="btn-danger" onclick="deleteQuestion('${doc.id}')">ลบ</button></td>
                 </tr>`;
             });
         } catch(err) { console.error(err); }
@@ -342,40 +369,69 @@
 
     async function saveQuestion() {
         let category = document.getElementById('q-category').value;
-        let qText = document.getElementById('q-text').value, c1 = document.getElementById('c1').value, c2 = document.getElementById('c2').value, c3 = document.getElementById('c3').value, c4 = document.getElementById('c4').value, ans = document.getElementById('ans').value;
+        let qText = document.getElementById('q-text').value;
+        let c1 = document.getElementById('c1').value, c2 = document.getElementById('c2').value;
+        let c3 = document.getElementById('c3').value, c4 = document.getElementById('c4').value;
+        let ans = document.getElementById('ans').value;
+        
         if(!category || !qText || !c1) { Swal.fire({ icon: 'warning', title: 'ข้อมูลไม่ครบ', text: 'กรุณากรอกข้อมูลโจทย์และตัวเลือกให้ครบถ้วน', confirmButtonColor: '#3b82f6' }); return; }
 
         let btn = document.getElementById('save-btn');
         btn.innerHTML = "กำลังบันทึก..."; btn.disabled = true;
 
-        let action = editingRowIndex ? "editQuestion" : "addQuestion";
-        let url = API_URL + `?action=${action}&category=${encodeURIComponent(category)}&q=${encodeURIComponent(qText)}&c1=${encodeURIComponent(c1)}&c2=${encodeURIComponent(c2)}&c3=${encodeURIComponent(c3)}&c4=${encodeURIComponent(c4)}&ans=${encodeURIComponent(ans)}`;
-        if(editingRowIndex) url += `&rowIndex=${editingRowIndex}`;
+        let qData = { category: category, q: qText, c1: c1, c2: c2, c3: c3, c4: c4, ans: ans };
 
-        await fetch(url, {redirect: "follow"});
-        Swal.fire({ icon: 'success', title: 'บันทึกสำเร็จ', timer: 1500, showConfirmButton: false });
-        cancelEdit(); loadQuestions();
+        try {
+            if(editingDocId) {
+                await db.collection('questions').doc(editingDocId).update(qData);
+            } else {
+                await db.collection('questions').add(qData);
+            }
+            Swal.fire({ icon: 'success', title: 'บันทึกสำเร็จ', timer: 1500, showConfirmButton: false });
+            cancelEdit(); loadQuestions();
+        } catch(err) {
+            Swal.fire({ icon: 'error', title: 'ผิดพลาด', text: 'บันทึกไม่สำเร็จ', confirmButtonColor: '#3b82f6' });
+            btn.innerHTML = editingDocId ? "บันทึกการแก้ไข" : "บันทึกข้อสอบ"; btn.disabled = false;
+        }
     }
 
     function editQuestion(qDataStr) {
         let q = JSON.parse(decodeURIComponent(qDataStr));
-        document.getElementById('q-text').value = q.q; document.getElementById('c1').value = q.choices[0].text; document.getElementById('c2').value = q.choices[1].text; document.getElementById('c3').value = q.choices[2].text; document.getElementById('c4').value = q.choices[3].text; document.getElementById('ans').value = q.ansIndex;
-        editingRowIndex = q.rowIndex; document.getElementById('form-title').innerHTML = "แก้ไขข้อสอบ"; document.getElementById('save-btn').innerHTML = "บันทึกการแก้ไข"; document.getElementById('cancel-edit-btn').style.display = "block"; document.getElementById('save-btn').disabled = false;
+        document.getElementById('q-text').value = q.q; 
+        document.getElementById('c1').value = q.c1; 
+        document.getElementById('c2').value = q.c2; 
+        document.getElementById('c3').value = q.c3; 
+        document.getElementById('c4').value = q.c4; 
+        document.getElementById('ans').value = q.ans;
+        
+        editingDocId = q.id; 
+        document.getElementById('form-title').innerHTML = "แก้ไขข้อสอบ"; 
+        document.getElementById('save-btn').innerHTML = "บันทึกการแก้ไข"; 
+        document.getElementById('cancel-edit-btn').style.display = "block"; 
+        document.getElementById('save-btn').disabled = false;
+        
         document.querySelector('#tab-questions .card').style.background = "#fffbeb"; 
         document.querySelector('#tab-questions .card').style.borderColor = "#fde68a";
         window.scrollTo({ top: 0, behavior: 'smooth' });
     }
 
     function cancelEdit() {
-        editingRowIndex = null;
-        document.getElementById('q-text').value = ''; document.getElementById('c1').value = ''; document.getElementById('c2').value = ''; document.getElementById('c3').value = ''; document.getElementById('c4').value = ''; document.getElementById('ans').value = '1';
-        document.getElementById('form-title').innerHTML = "สร้างข้อสอบใหม่"; document.getElementById('save-btn').innerHTML = "บันทึกข้อสอบ"; document.getElementById('cancel-edit-btn').style.display = "none";
+        editingDocId = null;
+        document.getElementById('q-text').value = ''; 
+        document.getElementById('c1').value = ''; document.getElementById('c2').value = ''; 
+        document.getElementById('c3').value = ''; document.getElementById('c4').value = ''; 
+        document.getElementById('ans').value = '1';
+        
+        document.getElementById('form-title').innerHTML = "สร้างข้อสอบใหม่"; 
+        document.getElementById('save-btn').innerHTML = "บันทึกข้อสอบ"; 
+        document.getElementById('cancel-edit-btn').style.display = "none";
+        
         document.querySelector('#tab-questions .card').style.background = "#f8fafc"; 
         document.querySelector('#tab-questions .card').style.borderColor = "#e2e8f0";
         loadQuestions();
     }
 
-    function deleteQuestion(rowIndex) {
+    function deleteQuestion(docId) {
         Swal.fire({
             title: 'ลบข้อสอบ?',
             text: "ข้อมูลข้อสอบข้อนี้จะถูกลบถาวร",
@@ -383,25 +439,31 @@
             showCancelButton: true,
             confirmButtonColor: '#ef4444',
             cancelButtonColor: '#94a3b8',
-            confirmButtonText: 'ลบเลย!',
-            cancelButtonText: 'ยกเลิก'
+            confirmButtonText: 'ลบเลย!'
         }).then(async (result) => {
             if (result.isConfirmed) {
-                await fetch(API_URL + `?action=deleteQuestion&rowIndex=${rowIndex}`, {redirect: "follow"});
+                await db.collection('questions').doc(docId).delete();
                 Swal.fire({ icon: 'success', title: 'ลบเรียบร้อย', timer: 1500, showConfirmButton: false });
                 loadQuestions();
             }
         });
     }
 
-    // --- ส่วนของการแสดง Dashboard และลบข้อมูล ---
-    async function loadDashboard() {
-        try {
-            const res = await fetch(API_URL + "?action=getDashboardData", {redirect: "follow"});
-            dashboardDataRaw = await res.json();
-            document.getElementById('selectAll').checked = false; // เคลียร์ปุ่มเลือกทั้งหมด
+    // --- ระบบ Dashboard (Real-time Firebase) ---
+    function startRealtimeDashboard() {
+        // ใช้ onSnapshot เพื่อดึงข้อมูลแบบ Real-time ถ้ามีใครเล่นจบ คะแนนจะเด้งขึ้นมาเอง
+        unsubscribeDashboard = db.collection('scores').onSnapshot((snapshot) => {
+            dashboardDataRaw = [];
+            snapshot.forEach((doc) => {
+                let data = doc.data();
+                data.docId = doc.id; // เก็บ ID ของ Firestore ไว้ลบ
+                dashboardDataRaw.push(data);
+            });
+            document.getElementById('selectAll').checked = false; 
             renderDashboard();
-        } catch(err) { console.error(err); }
+        }, (error) => {
+            console.error("Dashboard Sync Error: ", error);
+        });
     }
 
     function renderDashboard() {
@@ -417,15 +479,18 @@
             if(sortType === 'score-asc') return a.score - b.score;
             if(sortType === 'room') return a.room - b.room;
             if(sortType === 'name') return a.name.localeCompare(b.name);
-            return 0; // date-desc
+            return (b.timestampMs || 0) - (a.timestampMs || 0); // date-desc (ล่าสุดขึ้นก่อน)
         });
 
-        if(sortType === 'date-desc') filteredData.reverse();
+        if(sortType === 'date-desc') {
+            // ไม่ต้องทำอะไร sort ไว้แล้ว
+        } else if (sortType.includes('score')) {
+            // เรียงตาม logic ด้านบน
+        }
 
         filteredData.forEach(d => {
-            // เพิ่ม Checkbox และปุ่มลบรายบุคคล
             tbody.innerHTML += `<tr>
-                <td><input type="checkbox" class="row-checkbox" value="${d.rowIndex}"></td>
+                <td><input type="checkbox" class="row-checkbox" value="${d.docId}"></td>
                 <td style="color: #64748b; font-size: 13px;">${d.timestamp}</td>
                 <td style="font-weight: 600;">${d.number}</td>
                 <td style="font-weight: 500;">${d.name}</td>
@@ -433,20 +498,18 @@
                 <td>${d.room}</td>
                 <td><span style="background: #e0f2fe; color: #1d4ed8; padding: 3px 10px; border-radius: 12px; font-size: 13px;">${d.category}</span></td>
                 <td style="font-weight: 700; color: #2563eb; font-size: 16px;">${d.score}</td>
-                <td style="text-align: center;"><button class="btn-danger" onclick="deleteScores([${d.rowIndex}])">ลบ</button></td>
+                <td style="text-align: center;"><button class="btn-danger" onclick="deleteScores(['${d.docId}'])">ลบ</button></td>
             </tr>`;
         });
     }
 
-    // ฟังก์ชันเลือกทั้งหมด
     function toggleAll() {
         let isChecked = document.getElementById('selectAll').checked;
         document.querySelectorAll('.row-checkbox').forEach(cb => cb.checked = isChecked);
     }
 
-    // ฟังก์ชันลบหลายรายการ
     function deleteSelectedScores() {
-        let selected = Array.from(document.querySelectorAll('.row-checkbox:checked')).map(cb => parseInt(cb.value));
+        let selected = Array.from(document.querySelectorAll('.row-checkbox:checked')).map(cb => cb.value);
         if (selected.length === 0) {
             Swal.fire({ icon: 'warning', title: 'แจ้งเตือน', text: 'กรุณาติ๊กเลือกข้อมูลที่ต้องการลบก่อนครับ', confirmButtonColor: '#3b82f6' });
             return;
@@ -454,48 +517,45 @@
         deleteScores(selected);
     }
 
-    // ฟังก์ชันลบหลัก (ส่ง API)
-    function deleteScores(rowIndices) {
+    function deleteScores(docIds) {
         Swal.fire({
             title: 'ยืนยันการลบข้อมูล?',
-            text: `คุณกำลังลบข้อมูลสถิติ ${rowIndices.length} รายการ (ไม่สามารถกู้คืนได้)`,
+            text: `คุณกำลังลบข้อมูลสถิติ ${docIds.length} รายการ (ไม่สามารถกู้คืนได้)`,
             icon: 'warning',
             showCancelButton: true,
             confirmButtonColor: '#ef4444',
             cancelButtonColor: '#94a3b8',
-            confirmButtonText: 'ใช่, ลบทิ้งเลย!',
-            cancelButtonText: 'ยกเลิก'
+            confirmButtonText: 'ใช่, ลบทิ้งเลย!'
         }).then(async (result) => {
             if (result.isConfirmed) {
-                // แสดงสถานะโหลด
                 Swal.fire({ title: 'กำลังลบข้อมูล...', allowOutsideClick: false, didOpen: () => { Swal.showLoading() } });
                 
-                const url = API_URL + "?action=deleteScores&rowIndices=" + encodeURIComponent(JSON.stringify(rowIndices));
-                await fetch(url, { redirect: "follow" });
+                // ใช้ Batch เพื่อลบหลายๆ อันพร้อมกันในเสี้ยววิ
+                let batch = db.batch();
+                docIds.forEach(id => {
+                    let docRef = db.collection('scores').doc(id);
+                    batch.delete(docRef);
+                });
                 
+                await batch.commit();
                 Swal.fire({ icon: 'success', title: 'ลบสำเร็จ', timer: 1500, showConfirmButton: false });
-                loadDashboard();
             }
         });
     }
 
-    // --- ฟังก์ชันดาวน์โหลด CSV ---
     function exportToCSV() {
         if (dashboardDataRaw.length === 0) {
             Swal.fire({ icon: 'info', title: 'ไม่มีข้อมูล', text: 'ไม่มีข้อมูลสถิติให้ดาวน์โหลดครับ', confirmButtonColor: '#3b82f6' });
             return;
         }
         
-        // ใส่ BOM (\uFEFF) เพื่อให้ Excel อ่านภาษาไทยได้สมบูรณ์
         let csvContent = "\uFEFFวัน-เวลา,เลขที่,ชื่อ - นามสกุล,ชั้น,ห้อง,หมวดหมู่,คะแนน\n";
-        
-        // ดึงข้อมูลจากตารางที่แสดงผลอยู่ (เคารพการกรองและการจัดเรียง)
         let rows = document.querySelectorAll('#dashboard-table tbody tr');
+        
         rows.forEach(row => {
             let cols = row.querySelectorAll('td');
             if (cols.length > 2) {
                 let rowData = [];
-                // ลูปตั้งแต่คอลัมน์ที่ 1 (ข้าม Checkbox index 0) ถึงคอลัมน์ที่ 7 (ข้ามปุ่มลบ index 8)
                 for(let i=1; i<=7; i++) {
                     rowData.push(`"${cols[i].innerText}"`);
                 }
@@ -503,7 +563,6 @@
             }
         });
         
-        // สร้างไฟล์และสั่งดาวน์โหลด
         const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
         const url = URL.createObjectURL(blob);
         const link = document.createElement("a");
@@ -514,6 +573,7 @@
         document.body.removeChild(link);
     }
 
+    // --- ระบบ AI ---
     async function generateQuestionAI() {
         let cat = document.getElementById('q-category').value;
         let apiKey = localStorage.getItem('gemini_key');
